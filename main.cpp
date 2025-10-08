@@ -1,169 +1,213 @@
 #include "raylib.h"
-#include <stdlib.h> // Required for NULL definition and other standard C utilities
+#include <stdlib.h>
+#include <string.h>
+#include <emscripten/emscripten.h>
 
 // Define button dimensions
 #define BUTTON_WIDTH 120
 #define BUTTON_HEIGHT 40
 #define BUTTON_SPACING 40
 
-// --- API Configuration ---
-// In a simple C setup, we define constants here.
-// NOTE: For security, never share compiled code containing real keys.
-#define CAT_API_KEY "YOUR_SECRET_API_KEY_HERE"
+// Global Variables
+Texture2D catTexture = { 0 };
+char catImageUrl[512] = { 0 };
 
-// --- Global Variables for Texture and URL ---
-Texture2D catTexture = { 0 }; // The texture to draw (GPU data)
-char catImageUrl[256] = { 0 }; // Placeholder for the fetched URL string
+// JavaScript integration functions
+EM_JS(void, js_fetch_cat_image, (), {
+    // JavaScript code to fetch cat image from API
+    fetch('https://cataas.com/cat?json=true')
+        .then(response => response.json())
+        .then(data => {
+            const catUrl = 'https://cataas.com' + data.url;
+            // Pass the URL back to C
+            Module._js_receive_cat_url(catUrl);
+        })
+        .catch(error => {
+            console.error('Error fetching cat:', error);
+            Module._js_receive_cat_url('error');
+        });
+});
 
-// --- Function to Load the Cat Image from a URL ---
-void loadCatImage() {
-    // ----------------------------------------------------------------------
-    // NOTE ON API INTEGRATION:
-    // To fully integrate The Cat API, you would need:
-    // 1. A way to make an HTTP GET request (e.g., using a library like curl) 
-    //    and set the header: "x-api-key: " + CAT_API_KEY.
-    // 2. A JSON parser to extract the image URL from the API response
-    //    (e.g., from "https://api.thecatapi.com/v1/images/search").
-    //
-    // WARNING: raylib's standard LoadImage() function is used here. 
-    // True network loading often requires platform-specific configuration or 
-    // the use of an external HTTP library since LoadImage() is primarily for files.
-    // ----------------------------------------------------------------------
+EM_JS(void, js_load_image_from_url, (const char* url), {
+    // Load image from URL and create texture
+    const imageUrl = UTF8ToString(url);
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = function() {
+        // Create texture from loaded image
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+        
+        // Get image data and pass to C
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        Module._js_receive_cat_image(canvas.width, canvas.height, imageData.data);
+    };
+    img.onerror = function() {
+        Module._js_receive_cat_image(0, 0, null);
+    };
+    img.src = imageUrl;
+});
+
+// Callback functions called from JavaScript
+EMSCRIPTEN_KEEPALIVE
+void js_receive_cat_url(const char* url) {
+    if (strcmp(url, "error") == 0) {
+        TraceLog(LOG_WARNING, "Failed to fetch cat URL");
+        return;
+    }
     
-    // --- STATIC PLACEHOLDER URL ---
-    // Using a placeholder URL to simulate the successful fetching of an image link.
-    TextCopy(catImageUrl, "https://placehold.co/200x200/556B2F/ffffff?text=MEOW"); 
+    // Store the URL and load the image
+    TextCopy(catImageUrl, url);
+    TraceLog(LOG_INFO, "Received cat URL: %s", url);
+    js_load_image_from_url(url);
+}
 
-    // 1. Unload the previous texture if it exists
+EMSCRIPTEN_KEEPALIVE  
+void js_receive_cat_image(int width, int height, unsigned char* imageData) {
+    if (width == 0 || height == 0 || imageData == NULL) {
+        TraceLog(LOG_ERROR, "Failed to load cat image");
+        return;
+    }
+    
+    // Unload previous texture
     if (catTexture.id != 0) {
         UnloadTexture(catTexture);
     }
-
-    // 2. Load the image from the URL/path into CPU memory
-    Image catImage = LoadImage(catImageUrl); // CORRECTED: Changed LoadImageFromURL to LoadImage
     
-    // 3. Check if loading succeeded (Image data pointer should not be NULL)
-    if (catImage.data != NULL) {
-        // 4. Convert the Image to a Texture and upload to GPU
-        catTexture = LoadTextureFromImage(catImage);
-        
-        // 5. Free CPU memory used by the Image
-        UnloadImage(catImage); 
-        TraceLog(LOG_INFO, "New cat texture loaded successfully.");
-    } else {
-        // Fallback for failed network load
-        catTexture.id = 0; 
-        TraceLog(LOG_WARNING, "Failed to load cat image from URL. Network access required.");
+    // Create image from raw data
+    Image catImage = {
+        .data = imageData,
+        .width = width,
+        .height = height,
+        .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8,
+        .mipmaps = 1
+    };
+    
+    // Convert to texture
+    catTexture = LoadTextureFromImage(catImage);
+    TraceLog(LOG_INFO, "Cat texture loaded: %dx%d", width, height);
+    
+    // Note: We don't free imageData here as it's managed by JavaScript
+}
+
+// Function to load cat image
+void loadCatImage() {
+    TraceLog(LOG_INFO, "Fetching new cat image...");
+    
+    // Unload previous texture
+    if (catTexture.id != 0) {
+        UnloadTexture(catTexture);
+        catTexture.id = 0;
     }
+    
+    // Fetch new cat image via JavaScript
+    js_fetch_cat_image();
+}
+
+// Main game loop function
+void main_loop() {
+    // Get mouse position and check for clicks
+    Vector2 mousePoint = GetMousePosition();
+    bool mouseClicked = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
+    
+    // Calculate button positions
+    const int screenWidth = 960;
+    const int screenHeight = 600;
+    const int centerVisualSize = 200; 
+    const int centerX = screenWidth / 2;
+    const int centerY = screenHeight / 2;
+    
+    Rectangle leftButtonBounds = {
+        (float)centerX - centerVisualSize / 2 - BUTTON_WIDTH - BUTTON_SPACING,
+        (float)centerY - BUTTON_HEIGHT / 2,
+        BUTTON_WIDTH, 
+        BUTTON_HEIGHT
+    };
+
+    Rectangle rightButtonBounds = {
+        (float)centerX + centerVisualSize / 2 + BUTTON_SPACING,
+        (float)centerY - BUTTON_HEIGHT / 2,
+        BUTTON_WIDTH, 
+        BUTTON_HEIGHT
+    };
+    
+    // Check button interactions
+    if (mouseClicked) {
+        if (CheckCollisionPointRec(mousePoint, leftButtonBounds)) {
+            TraceLog(LOG_INFO, "FILTER Button Pressed!");
+            // Filter functionality can be added here
+        }
+        
+        if (CheckCollisionPointRec(mousePoint, rightButtonBounds)) {
+            TraceLog(LOG_INFO, "NEW CAT Button Pressed!");
+            loadCatImage();
+        }
+    }
+
+    // Drawing
+    BeginDrawing();
+        ClearBackground(RAYWHITE);
+        
+        // Draw cat texture
+        if (catTexture.id != 0) {
+            DrawTexture(catTexture, 
+                        centerX - catTexture.width / 2, 
+                        centerY - catTexture.height / 2, 
+                        WHITE);
+        } else {
+            // Loading message
+            DrawText("Click NEW CAT to load a cat!", centerX - 140, centerY - 10, 20, DARKGRAY);
+        }
+        
+        // Draw buttons
+        Color leftButtonColor = CheckCollisionPointRec(mousePoint, leftButtonBounds) ? LIGHTGRAY : DARKGRAY;
+        DrawRectangleRec(leftButtonBounds, leftButtonColor);
+        DrawText("FILTER", 
+                 (int)leftButtonBounds.x + 35, 
+                 (int)leftButtonBounds.y + 10, 
+                 20, 
+                 WHITE);
+        
+        Color rightButtonColor = CheckCollisionPointRec(mousePoint, rightButtonBounds) ? LIGHTGRAY : DARKGRAY;
+        DrawRectangleRec(rightButtonBounds, rightButtonColor);
+        DrawText("NEW CAT", 
+                 (int)rightButtonBounds.x + 20, 
+                 (int)rightButtonBounds.y + 10, 
+                 20, 
+                 WHITE);
+
+        // Title
+        DrawText("The Cat API Viewer - Web Version", 
+                 screenWidth/2 - MeasureText("The Cat API Viewer - Web Version", 20)/2, 
+                 10, 20, DARKBLUE);
+        
+        // Status
+        if (catTexture.id != 0) {
+            DrawText("Real cat loaded from API!", 10, screenHeight - 30, 20, DARKGREEN);
+        }
+        
+    EndDrawing();
 }
 
 int main() {
     const int screenWidth = 960;
     const int screenHeight = 600;
     
-    // --- Initialization ---
-    InitWindow(screenWidth, screenHeight, "Raylib Cat Viewer");
-    
-    // INITIAL LOAD: Load the first cat image (or placeholder)
-    loadCatImage();
-    
-    // --- Define Positions ---
-    
-    // We base the button positions on a fixed center size (if texture fails, it's 1x1, so we use a fixed visual anchor)
-    const int centerVisualSize = 200; 
-    const int centerX = screenWidth / 2;
-    const int centerY = screenHeight / 2;
-    
-    // 1. Button 1 (Left) Position and Rectangle
-    Rectangle leftButtonBounds = {
-        (float)centerX - centerVisualSize / 2 - BUTTON_WIDTH - BUTTON_SPACING, // Left of the visual center
-        (float)centerY - BUTTON_HEIGHT / 2,  // Y: Vertically centered
-        BUTTON_WIDTH, 
-        BUTTON_HEIGHT
-    };
-
-    // 2. Button 2 (Right / "NEW CAT") Position and Rectangle
-    Rectangle rightButtonBounds = {
-        (float)centerX + centerVisualSize / 2 + BUTTON_SPACING, // Right of the visual center
-        (float)centerY - BUTTON_HEIGHT / 2,      // Y: Vertically centered
-        BUTTON_WIDTH, 
-        BUTTON_HEIGHT
-    };
-    
+    // Initialization
+    InitWindow(screenWidth, screenHeight, "Raylib Cat API Viewer - Web");
     SetTargetFPS(60);
-
-    // --- Main Game Loop ---
-    while (!WindowShouldClose()) {
-        
-        // Get mouse position and check for a left-click
-        Vector2 mousePoint = GetMousePosition();
-        bool mouseClicked = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
-        
-        // --- Input and Logic ---
-        
-        // Check for LEFT Button interaction
-        if (CheckCollisionPointRec(mousePoint, leftButtonBounds)) {
-            if (mouseClicked) {
-                TraceLog(LOG_INFO, "LEFT Button Pressed!");
-                // You could use this button to change filter, zoom, etc.
-            }
-        }
-
-        // Check for RIGHT Button interaction (Load NEW CAT)
-        if (CheckCollisionPointRec(mousePoint, rightButtonBounds)) {
-            if (mouseClicked) {
-                TraceLog(LOG_INFO, "NEW CAT Button Pressed! Attempting to load...");
-                loadCatImage();
-            }
-        }
-
-        // --- Drawing ---
-        BeginDrawing();
-            ClearBackground(RAYWHITE);
-            
-            // 1. Draw the Cat Texture in the center
-            if (catTexture.id != 0) {
-                DrawTexture(catTexture, 
-                            centerX - catTexture.width / 2, 
-                            centerY - catTexture.height / 2, 
-                            WHITE);
-            } else {
-                // Draw error text if texture failed to load
-                DrawText("LOADING ERROR", centerX - 70, centerY - 10, 20, RED);
-            }
-            
-            // 2. Draw the Buttons
-            
-            // LEFT Button
-            Color leftButtonColor = CheckCollisionPointRec(mousePoint, leftButtonBounds) ? LIGHTGRAY : DARKGRAY;
-            DrawRectangleRec(leftButtonBounds, leftButtonColor);
-            DrawText("FILTER", 
-                     (int)leftButtonBounds.x + 35, 
-                     (int)leftButtonBounds.y + 10, 
-                     20, 
-                     WHITE);
-            
-            // RIGHT Button ("NEW CAT")
-            Color rightButtonColor = CheckCollisionPointRec(mousePoint, rightButtonBounds) ? LIGHTGRAY : DARKGRAY;
-            DrawRectangleRec(rightButtonBounds, rightButtonColor);
-            DrawText("NEW CAT", 
-                     (int)rightButtonBounds.x + 20, 
-                     (int)rightButtonBounds.y + 10, 
-                     20, 
-                     WHITE);
-
-            // Text at top (modified)
-            DrawText("The Cat API Viewer (Network Required)", 
-                     screenWidth/2 - MeasureText("The Cat API Viewer (Network Required)", 20)/2, 
-                     10, 20, 
-                     DARKBLUE);
-            
-        EndDrawing();
-        
-    }
     
-    // --- De-Initialization ---
-    UnloadTexture(catTexture); // Ensure the texture memory is freed
+    TraceLog(LOG_INFO, "Raylib Web Cat Viewer Started");
+    
+    // Use Emscripten's main loop for web
+    emscripten_set_main_loop(main_loop, 0, 1);
+    
+    // Cleanup (typically not reached in web)
+    UnloadTexture(catTexture);
     CloseWindow();
+    
     return 0;
 }
